@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>PDF マルチ結合エディタ（サムネ付・pdf.js + pdf-lib）</title>
+<!-- 依存は pdf.js(サムネ描画) と pdf-lib(結合/保存) の2つだけ -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  const pdfjsLib = window['pdfjs-dist/build/pdf'];
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+</script>
+<script src="https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js"></script>
+<style>
+  :root{--bg:#0b0f14;--panel:#111826;--ink:#e5e7eb;--muted:#9aa3b2;--line:rgba(255,255,255,.10);--chip:#0f172a}
+  html,body{height:100%;margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,"Noto Sans JP",sans-serif}
+  .wrap{max-width:1200px;margin:24px auto;padding:0 16px}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+  h1{font-size:18px;margin:0 0 8px}
+  .row{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+  .btn{appearance:none;border:1px solid var(--line);background:#1f2937;color:var(--ink);padding:8px 12px;border-radius:10px;cursor:pointer}
+  .btn:disabled{opacity:.55;cursor:not-allowed}
+  .muted{color:var(--muted)}
+  .file{margin-top:12px;border:1px solid var(--line);border-radius:12px;padding:10px;background:var(--chip)}
+  .file h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px}
+  .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
+  .page{background:#0b1322;border:1px solid var(--line);border-radius:12px;padding:8px;display:flex;flex-direction:column;gap:6px}
+  .thumb{width:100%;aspect-ratio:3/4;background:#0f172a;border:1px solid var(--line);border-radius:8px;display:grid;place-items:center;overflow:hidden}
+  .page .meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted)}
+  .ok{color:#86efac}
+  .error{color:#fca5a5}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <h1>PDF マルチ結合エディタ（サムネ付・pdf.js + pdf-lib）</h1>
+    <div class="row">
+      <label class="btn">📄 PDFを選択（複数可） <input id="pick" type="file" accept="application/pdf" multiple hidden></label>
+      <button id="btnAddAll" class="btn" disabled>全ページを結合リストに追加</button>
+      <button id="btnAddSel" class="btn" disabled>チェックしたページだけ追加</button>
+      <button id="btnClearQueue" class="btn" disabled>結合リストをクリア</button>
+    </div>
+    <div id="msg" class="muted" style="margin-top:8px">PDFを選んでください。</div>
+
+    <div id="files"></div>
+
+    <h2 style="font-size:16px;margin:16px 0 6px">結合リスト</h2>
+    <div class="row">
+      <button id="btnSave" class="btn" disabled>💾 保存</button>
+    </div>
+    <div id="queue" class="grid" aria-live="polite"></div>
+  </div>
+  <p class="muted" style="margin-top:10px">※ ブラウザ内で処理。プレビューは pdf.js のビットマップ、保存は pdf-lib のページコピーで可逆結合します。</p>
+</div>
+<script>
+const $=q=>document.querySelector(q);
+const elPick=$('#pick'), btnAddAll=$('#btnAddAll'), btnAddSel=$('#btnAddSel'), btnClearQueue=$('#btnClearQueue'), btnSave=$('#btnSave');
+const elFiles=$('#files'), elQueue=$('#queue'), msg=$('#msg');
+
+// 入力ファイル: [{name, arr, pdfPromise, pages:[{checked, canvas}] }]
+const FILES=[];
+// 結合キュー: [{fileIndex, pageIndex, rotation}]
+const QUEUE=[];
+
+elPick.addEventListener('change', async (e)=>{
+  const list=Array.from(e.target.files||[]);
+  if(!list.length) return;
+  msg.textContent='読み込み中…';
+  for(const f of list){
+    try{
+      const arr = await f.arrayBuffer();
+      // ▼ ArrayBuffer を“二重化”して detach 問題を回避
+      const bytes = new Uint8Array(arr);
+      const pdfjsBytes = new Uint8Array(bytes); // pdf.js 用の独立コピー
+      const libBytes   = new Uint8Array(bytes); // pdf-lib 用の独立コピー（保存側）
+
+      const loading = pdfjsLib.getDocument({data: pdfjsBytes});
+      const pdfPromise = loading.promise;
+      const pdf = await pdfPromise;
+      const n = pdf.numPages|0;
+      const rec = {name:f.name||'input.pdf', libBytes, pdfPromise, pages:[]};
+      for(let i=1;i<=n;i++){
+        rec.pages.push({checked:true, canvas:null, pageNumber:i});
+      }
+      FILES.push(rec);
+      // 非同期でサムネ描画
+      renderFile(FILES.length-1);
+    }catch(err){
+      console.error('読み込み失敗', err);
+      FILES.push({name:(f.name||'input.pdf')+'（読込失敗）', libBytes:null, pdfPromise:null, pages:[]});
+    }
+  }
+  updateButtons();
+  msg.textContent='OK：プレビューからページを選んで追加→保存。';
+  msg.textContent='OK：プレビューからページを選んで追加→保存。';
+});
+
+function updateButtons(){
+  const any = FILES.some(F=>F.pages.length>0);
+  btnAddAll.disabled = !any; btnAddSel.disabled = !any; btnClearQueue.disabled = QUEUE.length===0; btnSave.disabled = QUEUE.length===0;
+}
+
+async function renderFile(fi){
+  const F = FILES[fi];
+  const box = document.createElement('div'); box.className='file';
+  const h = document.createElement('h3'); h.textContent = `${fi+1}. ${F.name}`; box.appendChild(h);
+  const grid = document.createElement('div'); grid.className='grid'; box.appendChild(grid);
+  elFiles.appendChild(box);
+
+  const pdf = await F.pdfPromise;
+  for(let i=0;i<F.pages.length;i++){
+    const info = F.pages[i];
+    const cell = document.createElement('div'); cell.className='page';
+    const thumb = document.createElement('div'); thumb.className='thumb';
+    const cv = document.createElement('canvas'); thumb.appendChild(cv); info.canvas=cv;
+    const meta = document.createElement('div'); meta.className='meta';
+    const left = document.createElement('label'); const cb=document.createElement('input'); cb.type='checkbox'; cb.checked=info.checked; cb.onchange=()=> info.checked=cb.checked; left.appendChild(cb); left.appendChild(document.createTextNode(`ページ ${i+1}`));
+    const right = document.createElement('span'); right.textContent='0°';
+    meta.append(left,right);
+    cell.appendChild(thumb); cell.appendChild(meta);
+
+    // 回転ボタン
+    const ops=document.createElement('div'); ops.className='row'; ops.style.marginTop='-2px';
+    const rotL=document.createElement('button'); rotL.className='btn'; rotL.textContent='⟲';
+    const rotR=document.createElement('button'); rotR.className='btn'; rotR.textContent='⟳';
+    let rot=0; rotL.onclick=()=>{ rot=(rot+270)%360; right.textContent=rot+'°'; }; rotR.onclick=()=>{ rot=(rot+90)%360; right.textContent=rot+'°'; };
+    ops.append(rotL,rotR); cell.appendChild(ops);
+
+    grid.appendChild(cell);
+
+    // サムネ描画（適度な解像度）
+    try{
+      const pg = await pdf.getPage(i+1);
+      const viewport = pg.getViewport({scale:0.25});
+      cv.width = Math.floor(viewport.width);
+      cv.height = Math.floor(viewport.height);
+      const ctx = cv.getContext('2d');
+      await pg.render({canvasContext: ctx, viewport}).promise;
+    }catch(err){
+      console.warn('サムネ失敗', err);
+      const ctx = cv.getContext('2d');
+      cv.width=160; cv.height=210; ctx.fillStyle = '#111827'; ctx.fillRect(0,0,cv.width,cv.height);
+      ctx.fillStyle = '#fca5a5'; ctx.fillText('Render error', 10, 20);
+    }
+
+    // 追加時に参照する回転値をページ情報に保持
+    info.getRotation = ()=> rot;
+  }
+}
+
+btnAddAll.addEventListener('click', ()=>{
+  FILES.forEach((F,fi)=>{
+    F.pages.forEach((p,pi)=> QUEUE.push({fileIndex:fi, pageIndex:pi, rotation:(p.getRotation? p.getRotation():0)}));
+  });
+  paintQueue();
+});
+btnAddSel.addEventListener('click', ()=>{
+  FILES.forEach((F,fi)=>{
+    F.pages.forEach((p,pi)=>{ if(p.checked) QUEUE.push({fileIndex:fi, pageIndex:pi, rotation:(p.getRotation? p.getRotation():0)}); });
+  });
+  paintQueue();
+});
+btnClearQueue.addEventListener('click', ()=>{ QUEUE.length=0; paintQueue(); });
+
+function paintQueue(){
+  elQueue.innerHTML='';
+  QUEUE.forEach(async (q,idx)=>{
+    const cell=document.createElement('div'); cell.className='page';
+    const thumb=document.createElement('div'); thumb.className='thumb';
+    const cv=document.createElement('canvas'); thumb.appendChild(cv);
+    const meta=document.createElement('div'); meta.className='meta'; meta.innerHTML=`<span>F${q.fileIndex+1}・ページ ${q.pageIndex+1}</span><span>${q.rotation||0}°</span>`;
+    cell.append(thumb,meta);
+    elQueue.appendChild(cell);
+    // 既存の描画を使わず、低負荷で再サムネ（小さめ）
+    try{
+      const pdf = await FILES[q.fileIndex].pdfPromise;
+      const pg = await pdf.getPage(q.pageIndex+1);
+      const viewport = pg.getViewport({scale:0.2});
+      cv.width = Math.floor(viewport.width);
+      cv.height = Math.floor(viewport.height);
+      const ctx = cv.getContext('2d');
+      await pg.render({canvasContext: ctx, viewport}).promise;
+    }catch(err){ /* 省略可 */ }
+  });
+  updateButtons();
+}
+
+btnSave.addEventListener('click', save);
+async function save(){
+  if(!QUEUE.length) return;
+  msg.textContent='保存中…';
+  try{
+    const out = await PDFLib.PDFDocument.create();
+    const cache = new Map(); // fi -> PDFDocument
+    for(const q of QUEUE){
+      if(!cache.has(q.fileIndex)){
+        const bytes = FILES[q.fileIndex].libBytes;
+        // さらに保険でクローン（detach されていても再確保）
+        const safe = bytes ? new Uint8Array(bytes) : null;
+        const src = await PDFLib.PDFDocument.load(safe || bytes);
+        cache.set(q.fileIndex, src);
+      }
+      const srcDoc = cache.get(q.fileIndex);
+      const [copied] = await out.copyPages(srcDoc, [q.pageIndex]);
+      if(q.rotation){ copied.setRotation(PDFLib.degrees(q.rotation)); }
+      out.addPage(copied);
+    }
+    const bytes = await out.save({useObjectStreams:false});
+    const blob = new Blob([bytes], {type:'application/pdf'});
+    const url = URL.createObjectURL(blob);
+    const a=document.createElement('a'); a.href=url; a.download='merged.pdf'; document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(()=> URL.revokeObjectURL(url), 2000);
+    msg.innerHTML='<span class="ok">保存OK（結合完了）</span>';
+  }catch(err){
+    console.error(err);
+    msg.innerHTML = `<span class="error">保存失敗：${(err&&err.message)||err}</span>`;
+  }
+}
+</script>
+</body>
+</html>
