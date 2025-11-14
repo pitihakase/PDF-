@@ -25,6 +25,7 @@
   .file h3{margin:0 0 8px;font-size:14px;display:flex;align-items:center;gap:8px}
   .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:10px}
   .page{background:#0b1322;border:1px solid var(--line);border-radius:12px;padding:8px;display:flex;flex-direction:column;gap:6px}
+  .page.dragging{opacity:.6}
   .thumb{width:100%;aspect-ratio:3/4;background:#0f172a;border:1px solid var(--line);border-radius:8px;display:grid;place-items:center;overflow:hidden}
   .page .meta{display:flex;justify-content:space-between;align-items:center;font-size:12px;color:var(--muted)}
   .ok{color:#86efac}
@@ -62,6 +63,7 @@ const elFiles=$('#files'), elQueue=$('#queue'), msg=$('#msg');
 const FILES=[];
 // 結合キュー: [{fileIndex, pageIndex, rotation}]
 const QUEUE=[];
+let dragIndex=null;
 
 elPick.addEventListener('change', async (e)=>{
   const list=Array.from(e.target.files||[]);
@@ -167,11 +169,17 @@ function paintQueue(){
   elQueue.innerHTML='';
   QUEUE.forEach(async (q,idx)=>{
     const cell=document.createElement('div'); cell.className='page';
+    cell.draggable=true;
+    cell.dataset.index=idx;
     const thumb=document.createElement('div'); thumb.className='thumb';
     const cv=document.createElement('canvas'); thumb.appendChild(cv);
     const meta=document.createElement('div'); meta.className='meta'; meta.innerHTML=`<span>F${q.fileIndex+1}・ページ ${q.pageIndex+1}</span><span>${q.rotation||0}°</span>`;
     cell.append(thumb,meta);
     elQueue.appendChild(cell);
+    cell.addEventListener('dragstart', handleDragStart);
+    cell.addEventListener('dragend', handleDragEnd);
+    cell.addEventListener('dragover', handleDragOver);
+    cell.addEventListener('drop', handleDrop);
     // 既存の描画を使わず、低負荷で再サムネ（小さめ）
     try{
       const pdf = await FILES[q.fileIndex].pdfPromise;
@@ -184,6 +192,50 @@ function paintQueue(){
     }catch(err){ /* 省略可 */ }
   });
   updateButtons();
+}
+
+elQueue.addEventListener('dragover', e=>{ if(QUEUE.length){ e.preventDefault(); } });
+elQueue.addEventListener('drop', handleContainerDrop);
+
+function handleDragStart(e){
+  dragIndex = Number(e.currentTarget.dataset.index);
+  e.dataTransfer.effectAllowed='move';
+  e.dataTransfer.setData('text/plain','');
+  e.currentTarget.classList.add('dragging');
+}
+
+function handleDragEnd(e){
+  e.currentTarget.classList.remove('dragging');
+  dragIndex = null;
+}
+
+function handleDragOver(e){
+  e.preventDefault();
+  e.dataTransfer.dropEffect='move';
+}
+
+function handleDrop(e){
+  e.preventDefault();
+  e.stopPropagation();
+  if(dragIndex===null) return;
+  const targetIndex = Number(e.currentTarget.dataset.index);
+  if(Number.isNaN(targetIndex) || targetIndex===dragIndex) return;
+  const [item]=QUEUE.splice(dragIndex,1);
+  let dest = targetIndex;
+  if(dragIndex < targetIndex) dest = targetIndex-1;
+  QUEUE.splice(dest,0,item);
+  dragIndex = null;
+  paintQueue();
+}
+
+function handleContainerDrop(e){
+  e.preventDefault();
+  if(dragIndex===null) return;
+  if(e.target!==elQueue) return;
+  const [item]=QUEUE.splice(dragIndex,1);
+  QUEUE.push(item);
+  dragIndex = null;
+  paintQueue();
 }
 
 btnSave.addEventListener('click', save);
